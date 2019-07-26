@@ -1,3 +1,5 @@
+# Modified by Dmitrii Marin, https://github.com/dmitrii-marin
+#
 # Copyright 2018 The TensorFlow Authors All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +19,9 @@
 import tensorflow as tf
 from deeplab.core import feature_extractor
 from deeplab.core import preprocess_utils
-
+from deeplab.nus import _nus_sample, get_nus_predictor, _resize_locations, \
+    _get_near_boundary_sampling_locations, _nus_uniform_locations
+from deeplab import common
 
 # The probability of flipping the images and labels
 # left-right during training
@@ -36,7 +40,9 @@ def preprocess_image_and_label(image,
                                scale_factor_step_size=0,
                                ignore_label=255,
                                is_training=True,
-                               model_variant=None):
+                               model_variant=None,
+                               non_uniform_sampling=None,
+                               output_target_sampling=False):
   """Preprocesses the image and label.
 
   Args:
@@ -82,7 +88,7 @@ def preprocess_image_and_label(image,
     label = tf.cast(label, tf.int32)
 
   # Resize image and label to the desired range.
-  if min_resize_value or max_resize_value:
+  if not output_target_sampling and (min_resize_value or max_resize_value):
     [processed_image, label] = (
         preprocess_utils.resize_to_range(
             image=processed_image,
@@ -125,6 +131,15 @@ def preprocess_image_and_label(image,
     processed_image, label = preprocess_utils.random_crop(
         [processed_image, label], crop_height, crop_width)
 
+  if not is_training and label is not None:
+      with tf.name_scope("CentralCrop"):
+          offset_height = (target_height - crop_height) // 2
+          offset_width = (target_width - crop_width) // 2
+          processed_image = tf.image.crop_to_bounding_box(processed_image,
+            offset_height, offset_width, crop_height, crop_width)
+          label = tf.image.crop_to_bounding_box(label,
+            offset_height, offset_width, crop_height, crop_width)
+
   processed_image.set_shape([crop_height, crop_width, 3])
 
   if label is not None:
@@ -134,5 +149,41 @@ def preprocess_image_and_label(image,
     # Randomly left-right flip the image and label.
     processed_image, label, _ = preprocess_utils.flip_dim(
         [processed_image, label], _PROB_OF_FLIP, dim=1)
+
+  if non_uniform_sampling is not None:
+      if non_uniform_sampling == "net":
+          sampling = tf.py_func(
+            lambda image: get_nus_predictor()(image),
+            [processed_image[None,...]],
+            tf.float32,
+            name="nus_preprocess_sampling",
+          )
+          sampling = _resize_locations(sampling)
+      elif non_uniform_sampling == "uniform":
+          sampling = _nus_uniform_locations()
+      else:
+          raise Exception("Unknown non-uniform sampling type: %s" % non_uniform_sampling)
+      samples = { common.IMAGE: processed_image[None, ...] }
+      if is_training:
+          samples[common.LABEL] = label[None, ...]
+      samples = _nus_sample(samples, sampling)
+      processed_image = samples[common.IMAGE][0]
+      if is_training:
+          label = samples[common.LABEL][0]
+      return original_image, processed_image, label, sampling[0]
+
+  if output_target_sampling:
+      target_sampling = _get_near_boundary_sampling_locations(
+                label[None, ...], ignore_label)[0]
+      if min_resize_value or max_resize_value:
+        [processed_image, label] = preprocess_utils.resize_to_range(
+                image=processed_image,
+                label=label,
+                min_size=min_resize_value,
+                max_size=max_resize_value,
+                factor=resize_factor,
+                align_corners=True)
+
+      return original_image, processed_image, label, target_sampling
 
   return original_image, processed_image, label

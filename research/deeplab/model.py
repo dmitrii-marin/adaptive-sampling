@@ -162,7 +162,7 @@ def predict_labels_multi_scale(images,
   return outputs_to_predictions
 
 
-def predict_labels(images, model_options, image_pyramid=None):
+def predict_labels(images, model_options, image_pyramid=None, output_logits=False):
   """Predicts segmentation labels.
 
   Args:
@@ -203,6 +203,8 @@ def predict_labels(images, model_options, image_pyramid=None):
           align_corners=True,
           name='resize_prediction')
       predictions[output] = tf.squeeze(argmax_results, 3)
+    if output_logits:
+        predictions[output + "/logits"] = logits
 
   return predictions
 

@@ -53,6 +53,7 @@ import os
 import tensorflow as tf
 from deeplab import common
 from deeplab import input_preprocess
+from deeplab import nus
 
 # Named tuple to describe the dataset properties.
 DatasetDescriptor = collections.namedtuple(
@@ -129,7 +130,9 @@ class Dataset(object):
                num_readers=1,
                is_training=False,
                should_shuffle=False,
-               should_repeat=False):
+               should_repeat=False,
+               non_uniform_sampling=None,
+               output_target_sampling=False):
     """Initializes the dataset.
 
     Args:
@@ -189,6 +192,9 @@ class Dataset(object):
 
     self.num_of_classes = _DATASETS_INFORMATION[self.dataset_name].num_classes
     self.ignore_label = _DATASETS_INFORMATION[self.dataset_name].ignore_label
+
+    self.non_uniform_sampling = non_uniform_sampling
+    self.output_target_sampling = output_target_sampling
 
   def _parse_function(self, example_proto):
     """Function to parse the example proto.
@@ -280,7 +286,7 @@ class Dataset(object):
     image = sample[common.IMAGE]
     label = sample[common.LABELS_CLASS]
 
-    original_image, image, label = input_preprocess.preprocess_image_and_label(
+    preprocessed = input_preprocess.preprocess_image_and_label(
         image=image,
         label=label,
         crop_height=self.crop_size[0],
@@ -293,7 +299,18 @@ class Dataset(object):
         scale_factor_step_size=self.scale_factor_step_size,
         ignore_label=self.ignore_label,
         is_training=self.is_training,
-        model_variant=self.model_variant)
+        model_variant=self.model_variant,
+        non_uniform_sampling=self.non_uniform_sampling,
+        output_target_sampling=self.output_target_sampling)
+
+    if self.non_uniform_sampling is not None:
+        original_image, image, label, locations = preprocessed
+        sample[nus.SAMPLING] = locations
+    elif self.output_target_sampling:
+        original_image, image, label, target_sampling = preprocessed
+        sample[nus.TARGET_SAMPLING] = target_sampling
+    else:
+        original_image, image, label = preprocessed
 
     sample[common.IMAGE] = image
 

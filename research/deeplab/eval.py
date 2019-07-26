@@ -1,3 +1,4 @@
+# Modified by Dmitrii Marin, https://github.com/dmitrii-marin
 # Copyright 2018 The TensorFlow Authors All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +21,11 @@ See model.py for more details and usage.
 import tensorflow as tf
 from deeplab import common
 from deeplab import model
+from deeplab import nus
 from deeplab.datasets import data_generator
+from deeplab.utils import nus
+from deeplab.nus import _nus_locations, viz, SAMPLING, TARGET_SAMPLING
+
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -79,6 +84,8 @@ flags.DEFINE_integer('max_number_of_evaluations', 0,
                      'Maximum number of eval iterations. Will loop '
                      'indefinitely upon nonpositive values.')
 
+flags.DEFINE_string('eval_type', '', '')
+
 
 def main(unused_argv):
   tf.logging.set_verbosity(tf.logging.INFO)
@@ -96,7 +103,9 @@ def main(unused_argv):
       num_readers=2,
       is_training=False,
       should_shuffle=False,
-      should_repeat=False)
+      should_repeat=False,
+      non_uniform_sampling=FLAGS.nus_preprocess,
+      output_target_sampling=FLAGS.eval_type == "nus")
 
   tf.gfile.MakeDirs(FLAGS.eval_logdir)
   tf.logging.info('Evaluating on %s set', FLAGS.eval_split)
@@ -104,54 +113,79 @@ def main(unused_argv):
   with tf.Graph().as_default():
     samples = dataset.get_one_shot_iterator().get_next()
 
-    model_options = common.ModelOptions(
-        outputs_to_num_classes={common.OUTPUT_TYPE: dataset.num_of_classes},
-        crop_size=[int(sz) for sz in FLAGS.eval_crop_size],
-        atrous_rates=FLAGS.atrous_rates,
-        output_stride=FLAGS.output_stride)
+    if FLAGS.eval_type == "nus":
+        sampling_location = _nus_locations(samples[common.IMAGE], False)
+        target_locations = samples[TARGET_SAMPLING]
+        mse, update_op = tf.metrics.mean_squared_error(sampling_location, target_locations)
+        # update_op = tf.Print(update_op, [mse])
 
-    # Set shape in order for tf.contrib.tfprof.model_analyzer to work properly.
-    samples[common.IMAGE].set_shape(
-        [FLAGS.eval_batch_size,
-         int(FLAGS.eval_crop_size[0]),
-         int(FLAGS.eval_crop_size[1]),
-         3])
-    if tuple(FLAGS.eval_scales) == (1.0,):
-      tf.logging.info('Performing single-scale test.')
-      predictions = model.predict_labels(samples[common.IMAGE], model_options,
-                                         image_pyramid=FLAGS.image_pyramid)
+        # tf.summary.image("InputImages", samples[common.IMAGE])
+        # tf.summary.image("InputLabel", tf.to_float(samples[common.LABEL]) / 19)
+        # tf.summary.image("ResViz", viz(sampling_location))
+        tf.summary.scalar('mse', mse)
     else:
-      tf.logging.info('Performing multi-scale test.')
-      if FLAGS.quantize_delay_step >= 0:
-        raise ValueError(
-            'Quantize mode is not supported with multi-scale test.')
+        crop_size = [int(sz) for sz in FLAGS.eval_crop_size]
+        if FLAGS.nus_preprocess:
+            crop_size = [FLAGS.nus_sampling_size] * 2
 
-      predictions = model.predict_labels_multi_scale(
-          samples[common.IMAGE],
-          model_options=model_options,
-          eval_scales=FLAGS.eval_scales,
-          add_flipped_images=FLAGS.add_flipped_images)
-    predictions = predictions[common.OUTPUT_TYPE]
-    predictions = tf.reshape(predictions, shape=[-1])
-    labels = tf.reshape(samples[common.LABEL], shape=[-1])
-    weights = tf.to_float(tf.not_equal(labels, dataset.ignore_label))
+        model_options = common.ModelOptions(
+            outputs_to_num_classes={common.OUTPUT_TYPE: dataset.num_of_classes},
+            crop_size=crop_size,
+            atrous_rates=FLAGS.atrous_rates,
+            output_stride=FLAGS.output_stride)
 
-    # Set ignore_label regions to label 0, because metrics.mean_iou requires
-    # range of labels = [0, dataset.num_classes). Note the ignore_label regions
-    # are not evaluated since the corresponding regions contain weights = 0.
-    labels = tf.where(
-        tf.equal(labels, dataset.ignore_label), tf.zeros_like(labels), labels)
+        if tuple(FLAGS.eval_scales) == (1.0,):
+          tf.logging.info('Performing single-scale test.')
+          predictions = model.predict_labels(samples[common.IMAGE], model_options,
+                                             image_pyramid=FLAGS.image_pyramid,
+                                             output_logits=FLAGS.nus_preprocess)
+        else:
+          tf.logging.info('Performing multi-scale test.')
+          if FLAGS.quantize_delay_step >= 0:
+            raise ValueError(
+                'Quantize mode is not supported with multi-scale test.')
 
-    predictions_tag = 'miou'
-    for eval_scale in FLAGS.eval_scales:
-      predictions_tag += '_' + str(eval_scale)
-    if FLAGS.add_flipped_images:
-      predictions_tag += '_flipped'
+          predictions = model.predict_labels_multi_scale(
+              samples[common.IMAGE],
+              model_options=model_options,
+              eval_scales=FLAGS.eval_scales,
+              add_flipped_images=FLAGS.add_flipped_images)
 
-    # Define the evaluation metric.
-    miou, update_op = tf.metrics.mean_iou(
-        predictions, labels, dataset.num_of_classes, weights=weights)
-    tf.summary.scalar(predictions_tag, miou)
+        if FLAGS.nus_preprocess:
+            with tf.name_scope("nus_interpolation"):
+                assert FLAGS.eval_batch_size == 1, "Only support eval_batch_size == 1"
+                sampling = samples[SAMPLING]
+                logits = predictions[common.OUTPUT_TYPE + "/logits"]
+                shape = tf.shape(samples[common.LABEL])[1:3]
+                predictions = tf.py_func(
+                    nus.nus_interpolate,
+                    [logits[0], sampling[0], shape],
+                    logits.dtype,
+                )[None, ...]
+                predictions = tf.argmax(predictions, axis=3)
+        else:
+            predictions = predictions[common.OUTPUT_TYPE]
+        predictions = tf.reshape(predictions, shape=[-1])
+        labels = tf.reshape(samples[common.LABEL], shape=[-1])
+        weights = tf.to_float(tf.not_equal(labels, dataset.ignore_label))
+
+        # Set ignore_label regions to label 0, because metrics.mean_iou requires
+        # range of labels = [0, dataset.num_classes). Note the ignore_label regions
+        # are not evaluated since the corresponding regions contain weights = 0.
+        labels = tf.where(
+            tf.equal(labels, dataset.ignore_label), tf.zeros_like(labels), labels)
+
+        predictions_tag = 'miou'
+        for eval_scale in FLAGS.eval_scales:
+          predictions_tag += '_' + str(eval_scale)
+        if FLAGS.add_flipped_images:
+          predictions_tag += '_flipped'
+
+        # Define the evaluation metric.
+        miou, update_op = tf.metrics.mean_iou(
+            predictions, labels, dataset.num_of_classes, weights=weights)
+        miou = tf.Print(miou, ["mIoU", miou])
+        tf.summary.scalar(predictions_tag, miou)
 
     summary_op = tf.summary.merge_all()
     summary_hook = tf.contrib.training.SummaryAtEndHook(

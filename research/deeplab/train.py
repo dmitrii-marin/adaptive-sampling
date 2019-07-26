@@ -1,3 +1,5 @@
+# Modified by Dmitrii Marin, https://github.com/dmitrii-marin
+#
 # Copyright 2018 The TensorFlow Authors All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,11 +21,19 @@ See model.py for more details and usage.
 
 import six
 import tensorflow as tf
+import numpy as np
 from tensorflow.python.ops import math_ops
 from deeplab import common
 from deeplab import model
 from deeplab.datasets import data_generator
 from deeplab.utils import train_utils
+from deeplab.utils import nus
+from deeplab.nus import _nus_sample, _nus_locations, _nus_uniform_locations, \
+    _resize_locations, viz, SAMPLING, TARGET_SAMPLING
+
+import io
+import matplotlib.pyplot as plt
+
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -207,13 +217,55 @@ def _build_deeplab(iterator, outputs_to_num_classes, ignore_label):
   """
   samples = iterator.get_next()
 
+  train_size = [int(sz) for sz in FLAGS.train_crop_size]
+
+  if FLAGS.nus_preprocess is not None:
+      train_size = [FLAGS.nus_sampling_size] * 2
+
+  if FLAGS.nus_type is not None:
+      train_size = [FLAGS.nus_sampling_size] * 2
+      # sampling requested
+      if FLAGS.nus_type == 'uniform':
+          sampling_location = _nus_uniform_locations()
+      else:
+          shape = list(samples[common.IMAGE].get_shape())
+          if not isinstance(shape[0], int):
+              shape[0] = FLAGS.train_batch_size // FLAGS.num_clones
+              samples[common.IMAGE].set_shape(shape)
+          sampling_location = _nus_locations(samples[common.IMAGE])
+          if FLAGS.nus_train:
+              target_locations = samples[TARGET_SAMPLING]
+
+              tf.losses.mean_squared_error(sampling_location, target_locations)
+              target_locations.set_shape(sampling_location.get_shape())
+
+              tf.summary.image("InputImages", samples[common.IMAGE])
+              tf.summary.image("InputLabel", tf.to_float(samples[common.LABEL]) / 19)
+              tf.summary.image("ResViz", viz(sampling_location))
+              tf.summary.image("TargetViz", viz(target_locations))
+
+              return
+          sampling_location = _resize_locations(sampling_location)
+
+      with tf.name_scope("NUS-Sampling", values=[samples, sampling_location]):
+          samples = _nus_sample(samples, sampling_location)
+
   # Add name to input and label nodes so we can add to summary.
   samples[common.IMAGE] = tf.identity(samples[common.IMAGE], name=common.IMAGE)
   samples[common.LABEL] = tf.identity(samples[common.LABEL], name=common.LABEL)
 
+  if FLAGS.nus_preprocess:
+      sampling = samples[SAMPLING]
+      sampling_viz = tf.py_func(
+        viz_sampling,
+        [sampling],
+        tf.uint8,
+      )
+      tf.summary.image("Sampling", sampling_viz)
+
   model_options = common.ModelOptions(
       outputs_to_num_classes=outputs_to_num_classes,
-      crop_size=[int(sz) for sz in FLAGS.train_crop_size],
+      crop_size=train_size,
       atrous_rates=FLAGS.atrous_rates,
       output_stride=FLAGS.output_stride)
 
@@ -384,6 +436,7 @@ def _train_deeplab_model(iterator, num_of_classes, ignore_label):
       name_scope = ('clone_%d' % i) if i else ''
       with tf.name_scope(name_scope) as scope:
         grads = optimizer.compute_gradients(tower_losses[i])
+        grads = [g for g in grads if g[0] is not None]
         tower_grads.append(grads)
 
   with tf.device('/cpu:0'):
@@ -428,6 +481,20 @@ def _train_deeplab_model(iterator, num_of_classes, ignore_label):
   return train_tensor, summary_op
 
 
+def viz_sampling(images):
+  def _proc_image(a):
+    fig = plt.figure(num=0, figsize=(6, 4), dpi=300)
+    fig.clf()
+    plt.plot(a[...,1], a[...,0])
+    plt.plot(a[...,1].T, a[...,0].T)
+    fig.canvas.draw()
+    buf = fig.canvas.tostring_rgb()
+    ncols, nrows = fig.canvas.get_width_height()
+    shape = (nrows, ncols, 3)
+    return np.fromstring(buf, dtype=np.uint8).reshape(shape)
+  return np.stack(_proc_image(a) for a in images)
+
+
 def main(unused_argv):
   tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -457,10 +524,14 @@ def main(unused_argv):
           num_readers=2,
           is_training=True,
           should_shuffle=True,
-          should_repeat=True)
+          should_repeat=True,
+          non_uniform_sampling=FLAGS.nus_preprocess,
+          output_target_sampling=FLAGS.nus_train)
+
+      iterator = dataset.get_one_shot_iterator()
 
       train_tensor, summary_op = _train_deeplab_model(
-          dataset.get_one_shot_iterator(), dataset.num_of_classes,
+          iterator, dataset.num_of_classes,
           dataset.ignore_label)
 
       # Soft placement allows placing on CPU ops without GPU implementation.
@@ -469,9 +540,11 @@ def main(unused_argv):
 
       last_layers = model.get_extra_layer_scopes(
           FLAGS.last_layers_contain_logits_only)
+
       init_fn = None
+
       if FLAGS.tf_initial_checkpoint:
-        init_fn = train_utils.get_model_init_fn(
+         init_fn = train_utils.get_model_init_fn(
             FLAGS.train_logdir,
             FLAGS.tf_initial_checkpoint,
             FLAGS.initialize_last_layer,
