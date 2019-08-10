@@ -1,3 +1,9 @@
+# Efficient Segmentation: Learning Downsampling Near Semantic Boundaries
+
+See details of the implementation [here](https://github.com/dmitrii-marin/adaptive-sampling).
+
+The implementation is based of the DeepLab v3 implementation cited below:
+
 # DeepLab: Deep Labelling for Semantic Image Segmentation
 
 DeepLab is a state-of-art deep learning model for semantic image segmentation,

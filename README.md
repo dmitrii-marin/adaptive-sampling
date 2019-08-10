@@ -1,18 +1,72 @@
-# TensorFlow Models
+# Efficient Segmentation: Learning Downsampling Near Semantic Boundaries
 
-This repository contains a number of different models implemented in [TensorFlow](https://www.tensorflow.org):
+This is an implementation independently developed by Dmitrii Marin based on open materials
+([arXiv:1907.07156](https://arxiv.org/abs/1907.07156)). If you find the code useful for your 
+research, please consider citing our latest publication:
 
-The [official models](official) are a collection of example models that use TensorFlow's high-level APIs. They are intended to be well-maintained, tested, and kept up to date with the latest stable TensorFlow API. They should also be reasonably optimized for fast performance while still being easy to read. We especially recommend newer TensorFlow users to start here.
+* Dmitrii Marin, Zijian He, Peter Vajda, Priyam Chatterjee, Sam Tsai, Fei Yang, Yuri Boykov. 
+**Efficient Segmentation: Learning Downsampling Near Semantic Boundaries.** *In International Conference on Computer Vision (ICCV)*, 2019
 
-The [research models](https://github.com/tensorflow/models/tree/master/research) are a large collection of models implemented in TensorFlow by researchers. They are not officially supported or available in release branches; it is up to the individual researchers to maintain the models and/or provide support on issues and pull requests.
+```
+@InProceedings{marin2019efficient,
+  author = {Dmitrii Marin, Zijian He, Peter Vajda, Priyam Chatterjee, Sam Tsai, Fei Yang, Yuri Boykov},
+  title = {Efficient Segmentation: Learning Downsampling Near Semantic Boundaries},
+  booktitle = {IEEE International Conference on Computer Vision (ICCV)},
+  year = {2019},
+}
+```
 
-The [samples folder](samples) contains code snippets and smaller models that demonstrate features of TensorFlow, including code presented in various blog posts.
+### MobileNetV2 results
 
-The [tutorials folder](tutorials) is a collection of models described in the [TensorFlow tutorials](https://www.tensorflow.org/tutorials/).
+![MobileNetV2 results](research/deeplab/docs/chart.png)
 
-## Contribution guidelines
+## Training
 
-If you want to contribute to models, be sure to review the [contribution guidelines](CONTRIBUTING.md).
+The very first step is to download the CityScapes dataset and convert it to tensorflow records format. See [here](research/deeplab/g3doc/cityscapes.md)
+
+### Training Sampling Near Semantic Boundaries
+
+To train the auxiliary network predicting adaptive sampling location run
+```
+bash -x test_nus_mobilenetv2.sh
+```
+
+To evaluate MSE on the validation set run
+```
+bash -x eval_nus_mobilenetv2.sh
+```
+
+### Training Segmentation
+
+To train a MobileNetV2 model with our adaptive downsampling (to resolution 192x192) on cityscapes dataset run
+```
+CUDA_VISIBLE_DEVICES=0 SAMPLING_SIZE=192 bash -x test_mobilenetv2_with_nus.sh
+```
+To start an infinite loop evaluating checkpoints run 
+```
+CUDA_VISIBLE_DEVICES= MODE=EVAL SAMPLING_SIZE=192 bash -x test_mobilenetv2_with_nus.sh
+```
+
+#### Baseline
+```
+CUDA_VISIBLE_DEVICES=1 SAMPLING_SIZE=192 UNIFORM=1 bash -x test_mobilenetv2_with_nus.sh
+CUDA_VISIBLE_DEVICES= MODE=EVAL SAMPLING_SIZE=192 UNIFORM=1 bash -x test_mobilenetv2_with_nus.sh
+```
+
+## Changes with respect to the approach in the [paper](https://arxiv.org/abs/1907.07156v1)
+
+* The base model is Deeplabv3 with [MobileNetv2](https://arxiv.org/abs/1801.04381) backbone. The original paper uses 
+[PSP-Net](https://arxiv.org/abs/1612.01105), [Deeplabv3+ with Xception](https://github.com/tensorflow/models/tree/master/research/deeplab) and 
+[U-Net](https://arxiv.org/abs/1505.04597).
+
+* The auxiliary network is MobileNetv2 with reduced number of channels 
+and reduced input resolution. The original paper uses two stacked U-Net models.
+
+## Acknowledgements  
+
+The implementation is based of the DeepLab v3 implementation hosted at
+[Tensorflow's models repository](https://github.com/tensorflow/models). 
+For compactness we have removed parts unused in our implementation.
 
 ## License
 
