@@ -26,6 +26,18 @@ The very first step is to download the CityScapes dataset and convert it to tens
 
 ### Training Sampling Near Semantic Boundaries
 
+
+#### - Prerequisite 
+
+Compile the module that produces sampling locations from ground truth boundaries (Eq.2 in the paper).
+```
+cd research/deeplab/utils/nus
+sh build.sh
+```
+You will need CMake, [Ceres Solver](http://ceres-solver.org/), Cython and a C++ compiler.
+
+#### - Training
+
 To train the auxiliary network predicting adaptive sampling location run
 ```
 bash -x test_nus_mobilenetv2.sh
